@@ -19,10 +19,8 @@ const app = express();
 const port = process.env.PORT || 5000;
 const mongoUri = process.env.MONGODB_URI;
 
-const isDevbox = process.env.CODESANDBOX_SSE === "true" || !!process.env.PORT;
-if (isDevbox) {
-  app.set("trust proxy", 1);
-}
+// Trust proxy is required for secure cookies behind CodeSandbox's reverse proxy
+app.set("trust proxy", 1);
 
 // Middleware
 app.use(cors({
@@ -37,8 +35,8 @@ app.use(session({
   cookie: {
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000,
-    secure: isDevbox,
-    sameSite: isDevbox ? "none" : "lax",
+    secure: true, // Required for cross-origin cookies
+    sameSite: "none", // Required for cross-origin cookies
   },
 }));
 
