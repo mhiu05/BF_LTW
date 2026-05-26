@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import express from "express";
-import session from "express-session";
+import jwt from "jsonwebtoken";
 import cors from "cors";
 import multer from "multer";
 import path from "path";
@@ -18,6 +18,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const port = process.env.PORT || 5000;
 const mongoUri = process.env.MONGODB_URI;
+const JWT_SECRET = process.env.JWT_SECRET || "photo-app-jwt-secret-key";
 
 // Trust proxy is required for secure cookies behind CodeSandbox's reverse proxy
 app.set("trust proxy", 1);
@@ -28,17 +29,6 @@ app.use(cors({
   credentials: true,
 }));
 app.use(express.json());
-app.use(session({
-  secret: "photo-app-secret-key",
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    httpOnly: true,
-    maxAge: 24 * 60 * 60 * 1000,
-    secure: true, // Required for cross-origin cookies
-    sameSite: "none", // Required for cross-origin cookies
-  },
-}));
 
 // Serve uploaded images as static files
 const imagesDir = path.join(__dirname, "images");
@@ -59,31 +49,43 @@ function requireLogin(req, res, next) {
   // Skip auth for these routes
   if (
     (req.method === "POST" && req.path === "/admin/login") ||
-    (req.method === "POST" && req.path === "/admin/logout") ||
-    (req.method === "POST" && req.path === "/user") ||
-    (req.method === "GET" && req.path === "/admin/check")
+    (req.method === "POST" && req.path === "/user")
   ) {
     return next();
   }
-  if (!req.session.userId) {
+  
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ error: "Unauthorized" });
   }
-  next();
+
+  const token = authHeader.split(" ")[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.userId = decoded.userId;
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: "Unauthorized: Invalid token" });
+  }
 }
 app.use(requireLogin);
 
 // ==================== AUTH ENDPOINTS ====================
 
 // Check login status
-app.get("/admin/check", (req, res) => {
-  if (req.session.userId) {
-    return res.json({
-      _id: req.session.userId,
-      first_name: req.session.firstName,
-      login_name: req.session.loginName,
+app.get("/admin/check", async (req, res) => {
+  try {
+    const user = await User.findOne({ _id: req.userId }).lean();
+    if (!user) return res.status(401).json({ error: "User not found" });
+    res.json({
+      _id: user._id,
+      first_name: user.first_name,
+      login_name: user.login_name,
+      last_name: user.last_name
     });
+  } catch (e) {
+    res.status(500).json({ error: "Server error" });
   }
-  res.json(null);
 });
 
 // POST /admin/login
@@ -100,15 +102,19 @@ app.post("/admin/login", async (req, res) => {
     if (user.password !== password) {
       return res.status(400).json({ error: "Wrong password" });
     }
-    // Store user info in session
-    req.session.userId = user._id;
-    req.session.firstName = user.first_name;
-    req.session.loginName = user.login_name;
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: user._id },
+      JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
     res.json({
       _id: user._id,
       first_name: user.first_name,
       last_name: user.last_name,
       login_name: user.login_name,
+      token
     });
   } catch (error) {
     res.status(500).json({ error: "Login failed" });
@@ -117,15 +123,7 @@ app.post("/admin/login", async (req, res) => {
 
 // POST /admin/logout
 app.post("/admin/logout", (req, res) => {
-  if (!req.session.userId) {
-    return res.status(400).json({ error: "Not logged in" });
-  }
-  req.session.destroy((err) => {
-    if (err) {
-      return res.status(500).json({ error: "Logout failed" });
-    }
-    res.json({ message: "Logged out successfully" });
-  });
+  res.json({ message: "Logged out successfully" });
 });
 
 // ==================== USER ENDPOINTS ====================
@@ -303,7 +301,7 @@ app.post("/photos/new", upload.single("photo"), async (req, res) => {
       _id: new mongoose.Types.ObjectId().toString(),
       file_name: req.file.filename,
       date_time: new Date().toISOString(),
-      user_id: req.session.userId,
+      user_id: req.userId,
       comments: [],
     });
 
@@ -329,7 +327,7 @@ app.post("/commentsOfPhoto/:photo_id", async (req, res) => {
     }
 
     // Get the logged-in user info for embedding in the comment
-    const user = await User.findOne({ _id: req.session.userId }).lean();
+    const user = await User.findOne({ _id: req.userId }).lean();
     if (!user) {
       return res.status(400).json({ error: "User not found" });
     }
